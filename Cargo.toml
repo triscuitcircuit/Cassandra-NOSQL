@@ -1,0 +1,19 @@
+[package]
+name = "task1"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+cassandra-cpp = "2.0.0"
+serde = "1.0.125"
+tokio = { version = "1.0", features = ["rt", "rt-multi-thread", "macros", "test-util"] }
+futures = "0.3.1"
+logtest = "2.0.0"
+encoding_rs_io = "0.1.7"
+serde_json = "1.0"
+regex = "1"
+json = "*"
+csv = "1.1"
+encoding_rs = "*"

@@ -1,0 +1,216 @@
+#+AUTHOR: Tristan Zippert
+#+STARTUP: showeverything 
+
+#+LATEX_CLASS_OPTIONS: [11pt]
+#+Latex_HEADER: \usepackage[margin=1in]{geometry}
+#+LATEX_HEADER: \usepackage{enumitem}
+
+#+LaTeX_HEADER: \setlist{leftmargin=0.25in,nosep}
+#+LaTeX_HEADER: \documentclass[10pt,a4paper,showtrims]{document}
+#+LaTex_HEADER: \usepackage[labelfont=bf]{caption}
+#+LaTeX_HEADER: \hypersetup{colorlinks=true, urlcolor={blue}, linkcolor={blue}}
+
+#+LATEX_HEADER: \usepackage[natbib=true]{biblatex}
+#+LATEX_HEADER:\addbibresource{refs.bib} 
+#+LATEX_HEADER: \usepackage{tikz}
+#+LATEX_HEADER: \usetikzlibrary{shapes.misc,shadows,arrows, automata, shapes.multipart, positioning}
+#+LATEX_HEADER: \usepackage[linguistics]{forest}
+
+#+LaTeX_HEADER: \usepackage{sectsty}
+#+LATEX_HEADER: \usepackage{parskip}
+
+
+#+OPTIONS: h:3
+#+OPTIONS: 
+#+STARTUP: inlineimages
+#+TITLE: Homework Assignment 3: NOSQL and Spark 
+#+SUBTITLE: COS 598: Introduction to Data Science
+
+* Task 1: NoSQL (Cassandra) and Rust
+1.
+   The implementation was done in Rust and Cassandra. Due to the layout of the data in the CSV files, and developing for fast access based on name,
+   I would just have the movie name as the primary key. I chose this since the movie name has the date of release embedded in it, which
+   would prevent collisions based on movies of the same name. When I was creating the code for this task, I made use of [[https://github.com/Metaswitch/cassandra-rs][Cassandra-rs]] which was in the middle
+   of an API redesign. An issue I encountered was with using Cassandra UDT (User Defined Types), which apparently can be accessed through the use of that
+   Rust crate -- though its awaiting an update for Tokio await as mentioned in this [[https://github.com/Metaswitch/cassandra-rs/issues/166][thread]]. Rust code is located in the ~Task1~ folder
+2. For querying the ~moviedb.movies~ Cassandra table, I used Cassandras built in interactive shell called ~cqlsh~. I used the following
+command to query for "Shrek (2001)".
+#+BEGIN_SRC
+select * from moviedb.movies where name = 'Shrek (2001)';
+#+END_SRC 
+Which returns the result:
+#+BEGIN_SRC
+Shrek (2001) | 300229 | [{'Andrew Adamson', '[Duloc Mascot]'}, 
+{'Guillaume (II) Aretos', '[Merry Man]'}, 
+{'Val Bettin', '[Bishop]'}, {'John Bisom', '[Merry Man]'}, 
+{'Bobby Block', '[Baby Bear]'}, {'Cody Cameron', '[Pinocchio/Three Pigs]'}, 
+{'Vincent Cassel', '[Monsieur Hood]'}, 
+{'Jim Cummings', '[Captain of Guards]'}, 
+{'Peter Dennis', '[Ogre Hunter]'}, 
+{'Michael Galasso', '[Peter Pan]'}, 
+{'Matthew Gonder', '[Merry Man]'}, 
+{'Christopher Knights', '[Blind Mouse/Thelonious]'}, 
+{'John Lithgow', '[Lord Farquaad of Duloc]'}, 
+{'Chris (VII) Miller', '[Geppetto/Magic Mirror]'}, 
+{'Eddie (I) Murphy', '[Donkey]'}, 
+{'Mike Myers', '[Shrek/Blind Mouse/Narrator]'}, 
+{'Clive Pearse', '[Ogre Hunter]'}, 
+{'Calvin Remsberg', '[Merry Man]'}, 
+{'Simon J. Smith', '[Blind Mouse]'}, 
+{'Conrad (I) Vernon', '[Gingerbread Man]'}, 
+{'Jean-Paul Vignon', '[Merry Man]'}, 
+{'Jacquie Barnbrook', '[Wrestling Fan]'}, 
+{'Cameron Diaz', '[Princess Fiona]'}, 
+{'Kathleen (I) Freeman', '[Old Woman]'}, {
+'Elisa Gabrielli', '[Additional Voices]'}] | Andrew Adamson |  8.1 | 2001
+#+END_SRC
+3. If I were designing a key for fast access based on year and name, I would use the following Cassandra table definition:
+   #+BEGIN_SRC
+    CREATE TABLE IF NOT EXISTS moviedb.movies (
+        name text,
+        mid int,
+        year int,
+        rank float,
+        director text,
+        cast list<frozen<set<text>>>,
+        PRIMARY KEY (year,name)
+        );"#;
+   #+END_SRC
+(If someone wanted to use ~mid~ as well, it can be combined into one key with the following ~PRIMARY KEY ((name,mid), year)~ )
+* Page Rank
+~Help received: Adam Green~: Helped me with understanding how to capture nodes that would be removed from reduceBykey
+#+BEGIN_SRC python
+    from pyspark import SparkConf, SparkContext
+from operator import add
+
+from pyspark.sql import SparkSession
+
+
+# Function to compute  contributions to the rank of other nodes
+def computeContribs(neighbors, rank):
+    num_neighbors = len(neighbors)
+    for neighbor in neighbors:
+        yield neighbor, rank / num_neighbors
+
+
+if __name__ == "__main__":
+    # spark connection and session
+    conf = SparkConf().setMaster("local").setAppName("page_rank")
+    sc = SparkContext(conf=conf)
+
+    spark = SparkSession \
+        .builder \
+        .appName("PythonPageRank") \
+        .getOrCreate()
+
+    # Load input from file
+    lines = spark.read.text("input.txt").rdd.map(lambda r: r[0])
+
+    # Create links RDD from input
+    links = lines.map(lambda urls: (urls.split()[0], urls.split()[1])).distinct().groupByKey().cache()
+
+    # Initialize ranks of contribs to 1
+    ranks = links.map(lambda url_neighbors: (url_neighbors[0], 1.0))
+
+    # Perform PageRank iterations
+    for iteration in range(10):
+        # Compute contributions to the rank of other node
+
+        contribs = links.join(ranks).flatMap(lambda url_urls_rank: computeContribs(
+            url_urls_rank[1][0], url_urls_rank[1][1]))
+
+        for connection in ranks.keys().collect():
+            # check if node is not already in the collection, if not add it.
+            # this is due to reduceByKeys() removing once the Value() reaches 0
+            # preventing final calculation
+            if connection not in contribs.keys().collect():
+                # parallelize the connection
+                new_val = sc.parallelize([(connection, 0.0)])
+                contribs = contribs.union(new_val)
+
+        # Re-calculate node ranks based on neighbor contributions
+        contribs = contribs.reduceByKey(add).mapValues(lambda rank: rank * 0.85 + 0.15)
+
+        ranks = contribs
+    count = ranks.count()
+    ranks = ranks.map(lambda x: (x[0], x[1] / count))
+    # Print results
+    # Error'd when trying to save with Spark
+
+    with open("output.txt", "w") as f:
+        for (link, rank) in ranks.sortByKey().collect():
+            print(link, rank)
+            f.write(f"{link} {rank}\n")
+  #+END_SRC
+* Task 3
+\paragraph{}
+Due to the way my ~Task 2~ was designed, I was already making use of a Spark Session. This makes it easy to add dataframe support
+at the end of the code by just calling this python code after everything is written to the file.
+#+BEGIN_SRC python
+    df = ranks.toDF(["vertex", "rank"])
+    df.show()
+#+END_SRC
+This code has an output of:
+#+BEGIN_SRC
++------+------------------+
+|vertex|         page_rank|
++------+------------------+
+|     2|0.4485009130149168|
+|     1|            0.0375|
+|     3|         0.0534375|
+|     0|0.4605615869850829|
++------+------------------+
+#+END_SRC
+2. \paragraph{} Python Spark code that can convert the dataframe to a `TempView` and query it for the second vertex looks like this:
+   #+BEGIN_SRC python
+    df.createOrReplaceTempView("page_rank_table")
+    df_result = spark.sql("SELECT rank FROM page_rank_table WHERE vertex = 2")
+    df_result.show()
+   #+END_SRC
+The result of this code is as such:
+#+BEGIN_SRC
++------------------+
+|              rank|
++------------------+
+|0.4485009130149168|
++------------------+
+#+END_SRC
+3. 
+\paragrah{}
+Going off the previous code implemented in Task 2, as well as converting the output to a Spark dataframe, code that can get the highest page rank and vertex is:
+#+BEGIN_SRC
+    result = spark.sql("SELECT * FROM page_rank_table ORDER BY page_rank DESC LIMIT 1")
+    result.select("vertex", "rank").show()
+#+END_SRC
+This code queries Spark dataframe and requests the information back in descending order,
+and then ~result~ parses "vertex" and "rank" of the query. The result is this:
+#+BEGIN_SRC
++------+------------------+
+|vertex|              rank|
++------+------------------+
+|     0|0.4605615869850829|
++------+------------------+
+#+END_SRC
+This result also makes intuitive sense due to the fact that more people are going to visit the homepage of a site compared to the sites linking from it,
+thus giving it a higher page rank score.
+4.
+   \paragraph{}
+   Assuming that the data exists in a text file called ~names.txt~,then it can be read into a Spark dataframe with the following code:
+   #+BEGIN_SRC python
+	names = spark.sparkContext.textFile("names.txt")\
+	.map(lambda x: x.split(" ")).toDF(["vertex","name"])
+     names.show()
+    #+END_SRC
+ 5. The dataframe from the last part can be merged with the previous Spark dataframe with the following code:
+    #+BEGIN_SRC python
+    result_df = df.join(names, "vertex", "inner")
+    result_df.write.csv("output.csv")
+    #+END_SRC
+    This results in a Spark created folder called ~output.csv~ with the `.csv` with the resulting contents:
+    #+BEGIN_SRC
+0,0.4605615869850829,Adam
+1,0.0375,Lisa
+2,0.4485009130149168,Bert
+3,0.0534375,Ralph
+
+    #+END_SRC
